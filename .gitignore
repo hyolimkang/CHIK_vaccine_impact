@@ -1,0 +1,37 @@
+# Large data/document folders (kept local / OneDrive only)
+/0_Readings/
+/1_Data/
+/1_1_OutputData/
+/2_Codes/
+/3_Figures/
+/4_Slides/
+/5_Writings/
+/Revision/
+/nrmicro2368*.pdf
+
+# CHIK_ORV_impact: only track 01_Script
+/CHIK_ORV_impact/*
+!/CHIK_ORV_impact/01_Script/
+!/CHIK_ORV_impact/01_Script/**
+
+# Data file types (safety net, wherever they appear)
+*.RData
+*.RDS
+*.rds
+*.nc
+*.tif
+*.tiff
+*.gri
+*.grd
+*.grib
+*.shp
+*.shx
+*.dbf
+*.zip
+
+# OS / editor cruft
+.DS_Store
+.Rhistory
+.Rapp.history
+.RData
+.Rproj.user/

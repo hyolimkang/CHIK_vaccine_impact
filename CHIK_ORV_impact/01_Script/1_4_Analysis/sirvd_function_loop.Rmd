@@ -1,0 +1,488 @@
+---
+title: "sirv_grid_search"
+output: html_document
+date: "2025-01-14"
+---
+source("01_Script/1_1_Functions/sim_functions.R")
+source("01_Script/1_1_Functions/sir_functions.R")
+
+```{r fatality data by age group}
+# applied fatality data from Brazil (age specific)
+total_n <- overall %>% group_by(age_group)%>%
+                         mutate(total_n = sum(n)) %>% 
+                         mutate(hosp_rate = n / total_n)
+
+hosp_chikv$total_n <- total_n[, 7]
+hosp_chikv <- hosp_chikv %>% group_by(age_group)%>%
+  mutate(hosp_n = sum(n)) %>% 
+  mutate(hosp_rate = hosp_n / total_n)
+
+hosp_chikv <- hosp_chikv %>% mutate(fatal_rate = ifelse(death_chikv == "TRUE", n/hosp_n, 0))
+
+hosp_fatal_all <- hosp_chikv %>% filter(death_chikv == "TRUE") %>%
+                    mutate(var =  ((hosp_rate$total_n*1.1 - hosp_rate$total_n*0.9)/3.92)^2 )
+
+hosp_fatal_all <- hosp_fatal_all %>% mutate(fatal_var = ((upper - lower)/3.92)^2 )
+
+fatal <- hosp_fatal_all$fatal_rate
+fatal <- c(rep(fatal[1],4), # 0-1, 1-4, 5-9. 10-11
+           rep(fatal[2],2), # 12-17, 18-19 
+           rep(fatal[3],2), # 20-24, 25-29
+           rep(fatal[4],2), # 30-34, 35-39
+           rep(fatal[5],2), # 40-44, 45-49
+           rep(fatal[6],2), # 50-54, 55-59
+           rep(fatal[7],2), # 60-64, 65-69
+           rep(fatal[8],2), # 70-74, 75-79
+           rep(mean(c(fatal[9], fatal[10])),2)
+           ) # 80-84, 85+
+
+hosp <- as.vector(hosp_fatal_all$hosp_rate[[1]])
+hosp <- c(rep(hosp[1],4), # 0-1, 1-4, 5-9. 10-11
+           rep(hosp[2],2), # 12-17, 18-19 
+           rep(hosp[3],2), # 20-24, 25-29
+           rep(hosp[4],2), # 30-34, 35-39
+           rep(hosp[5],2), # 40-44, 45-49
+           rep(hosp[6],2), # 50-54, 55-59
+           rep(hosp[7],2), # 60-64, 65-69
+           rep(hosp[8],2), # 70-74, 75-79
+           rep(mean(c(hosp[9], hosp[10])),2)
+           ) # 80-84, 85+
+
+
+non_hosp_chikv <- non_hosp_chikv %>% group_by(age_group)%>%
+  mutate(total_n = sum(n))
+
+non_hosp_chikv <- non_hosp_chikv %>% mutate(fatal_rate = ifelse(death_chikv == "TRUE", n/total_n, 0))
+
+non_hosp_fatal <- non_hosp_chikv %>% filter(death_chikv == "TRUE") %>% mutate(fatal_var = ((upper - lower)/3.92)^2 )
+  
+nh_fatal <- non_hosp_fatal$fatal_rate
+nh_fatal <- c(rep(nh_fatal[1],4), # 0-1, 1-4, 5-9. 10-11
+           rep(nh_fatal[2],2), # 12-17, 18-19 
+           rep(nh_fatal[3],2), # 20-24, 25-29
+           rep(nh_fatal[4],2), # 30-34, 35-39
+           rep(nh_fatal[5],2), # 40-44, 45-49
+           rep(nh_fatal[6],2), # 50-54, 55-59
+           rep(nh_fatal[7],2), # 60-64, 65-69
+           rep(nh_fatal[8],2), # 70-74, 75-79
+           rep(mean(c(nh_fatal[9], nh_fatal[10])),2)
+           ) # 80-84, 85+
+
+
+save("hosp", "nh_fatal", "fatal",
+     file = "00_Data/0_2_Processed/chikv_fatal_hosp_rate.RData")
+
+```
+
+```{r prevacc}
+# cruzeiro de sul
+lambda <- 0.003843 # 0.00279100 0.005134
+# age groups
+age_groups <- c(mean(0:4),
+                mean(5:9),
+                mean(10:14),
+                mean(15:19),
+                mean(20:24),
+                mean(25:29),
+                mean(30:34),
+                mean(35:39),
+                mean(40:44),
+                mean(45:49),
+                mean(50:54),
+                mean(55:59),
+                mean(60:64),
+                mean(65:69),
+                mean(70:74),
+                mean(75:79),
+                mean(80:84),
+                mean(85:89)
+                )
+  
+sim_result_novacc <- sirv_sim_coverageSwitch_Fatal(
+  T = 52, 
+  A = 18,
+  N = N_region1,
+  r = rep(0, 18),  # Aging rate, here set to 0 for all age groups
+  
+  base_beta = base_beta,
+  I0_draw = I0,
+  R0  = 1 - exp(-lambda * age_groups),
+  rho = rho,
+  gamma = gamma,
+  
+  delay = 52,                   # Vaccination starts from Week x
+  VE_block = 0,             # Vaccine efficacy
+  target_age = c(rep(0,18)),  # Targeting specific age groups
+  coverage_threshold = 0,
+  total_coverage = 0,
+  weekly_delivery_speed = 0,
+  VE_p = 0, 
+  FR_infection = fatal
+)
+
+# pre-vacc
+summary_cases_pre <- as.data.frame.table(sim_result_novacc$age_stratified_cases, responseName = "Median")
+summary_Ifatal_pre <- as.data.frame.table(sim_result_novacc$IFatal_detect, responseName = "IFatal")
+summary_IVfatal_pre <- as.data.frame.table(sim_result_novacc$IVFatal_detect, responseName = "IVFatal")
+
+# Rename columns for clarity
+colnames(summary_cases_pre) <- c("AgeGroup", "Week","Median")
+colnames(summary_Ifatal_pre) <- c("AgeGroup", "Week","Median")
+colnames(summary_IVfatal_pre) <- c("AgeGroup", "Week","Median")
+
+# Convert columns to numeric for correct ordering
+summary_cases_pre <- summary_cases_pre %>%
+  mutate(
+    AgeGroup = as.numeric(AgeGroup),
+    Week = as.numeric(Week)
+  )
+
+summary_cases_pre$Scenario <- "Pre-Vaccination"
+
+summary_cases_pre_all <- summary_cases_pre %>% group_by(Week) %>%
+  summarise(
+    Median   = sum(Median)
+  ) %>% mutate(
+    Scenario = "Pre-vaccination"
+  )
+
+summary_Ifatal_pre <- summary_Ifatal_pre %>%
+  mutate(
+    AgeGroup = as.numeric(AgeGroup),
+    Week = as.numeric(Week)
+  )
+
+summary_Ifatal_pre$Scenario <- "Pre-Vaccination"
+
+summary_Ifatal_pre_all <- summary_Ifatal_pre %>% group_by(Week) %>%
+  summarise(
+    Median   = sum(Median)
+  ) %>% mutate(
+    Scenario = "Pre-vaccination"
+  )
+
+summary_R_pre <- as.data.frame.table(sim_result_novacc$R, responseName = "R")
+colnames(summary_R_pre) <- c("AgeGroup", "Week","Median")
+
+summary_R_pre <- summary_R_pre %>%
+  mutate(
+    AgeGroup = as.numeric(AgeGroup),
+    Week = as.numeric(Week),
+    Median_rho = Median * rho
+  )
+
+summary_R_pre$Scenario <- "Pre-Vaccination"
+
+summary_R_pre_all <- summary_R_pre %>% group_by(Week) %>% 
+                       summarise(
+                         Median_raw = sum(Median),
+                         Median   = Median_raw * rho
+                       )
+
+```
+
+```{r }
+ggplot()+
+  geom_line(data = summary_cases_pre, aes(x = Week, y = Median, color = Scenario))+
+  facet_wrap(~AgeGroup)+
+  theme_bw()
+```
+
+
+```{r grid search prep}
+# Total supply rate (0% to 100%)
+total_supply_rates <- seq(0.1, 1, by = 0.1)         
+
+# Weekly delivery speed (daily:0.01% to 1% => weekly 0.07 to 7)
+weekly_delivery_speeds <- seq(0.01, 0.1, by = 0.01) 
+
+# Transmission blocking efficacy and disease blocking efficacy (10% to 100%)
+VE_blocks <- seq(0.1, 1, by = 0.1)               
+VE_ps <- seq(0.1, 1, by = 0.1)
+
+param_grid <- expand.grid(
+  TotalSupplyRate     = total_supply_rates,
+  WeeklyDeliverySpeed = weekly_delivery_speeds,
+  VE_block            = VE_blocks,
+  VE_p                = VE_ps
+)
+
+param_grid <- param_grid %>%
+  mutate(
+    TotalSupplyRate = as.numeric(TotalSupplyRate),
+    WeeklyDeliverySpeed = as.numeric(WeeklyDeliverySpeed),
+    VE_block = as.numeric(VE_block),
+    VE_p = as.numeric(VE_p)
+  )
+
+results <- data.frame(
+  CombinationID       = seq_len(nrow(param_grid)),
+  TotalSupplyRate     = param_grid$TotalSupplyRate,
+  WeeklyDeliverySpeed = param_grid$WeeklyDeliverySpeed,
+  VE_block            = param_grid$VE_block,
+  VE_p                = param_grid$VE_p,
+  Impact              = numeric(nrow(param_grid)),          
+  TotalIFatal         = numeric(nrow(param_grid)),     
+  TotalIVFatal        = numeric(nrow(param_grid))     
+)
+
+```
+
+```{r target age groups: strategies}
+target_age_list <- list(c(1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                        c(0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0),
+                        c(0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1),
+                        c(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1))
+
+```
+
+```{r loop through results combinations}
+all_results <- list()  # To store detailed simulation summaries for each iteration
+
+num_iters <- 1 
+
+for (i_iter in seq_len(num_iters)) {
+  print(sprintf("Running iteration: %.0f of %.0f", i_iter, num_iters)) 
+  
+  iteration_result  <- list()
+  iteration_sim_dfs <- list()
+  
+  # Iterate through all combinations in param_grid
+  for (param_index in seq_len(nrow(param_grid))) {
+    params <- param_grid[param_index, ]
+    
+    for (scenario_index in seq_along(target_age_list)) {
+      target <- target_age_list[[scenario_index]]
+      
+      print(sprintf(
+        "Iteration %d, Scenario %d: Total Supply %.1f%%, Weekly Speed %.1f%%, VE_block %.2f, VE_p %.2f",
+        i_iter, scenario_index, params$TotalSupplyRate * 100,
+        params$WeeklyDeliverySpeed * 100, params$VE_block, params$VE_p
+      ))
+      
+      sim_result <- sirv_sim_coverageSwitch_Fatal(
+        T = 52,
+        A = 18,
+        N = N_region1,
+        r = rep(0, 18),
+        base_beta = base_beta,
+        I0_draw = I0,
+        rho = rho,
+        gamma = gamma,
+        delay = 1,
+        VE_block = params$VE_block,
+        VE_p = params$VE_p,
+        coverage_threshold = 0.9,
+        FR_infection = fatal,
+        target_age = target,
+        total_coverage = params$TotalSupplyRate,
+        weekly_delivery_speed = params$WeeklyDeliverySpeed
+      )
+      
+      # Summarize detected fatalities
+      total_IFatal_detect <- sum(sim_result$IFatal_detect)
+      total_IVFatal_detect <- sum(sim_result$IVFatal_detect)
+      
+      # Update cumulative results
+      results$TotalIFatal[param_index] <- results$TotalIFatal[param_index] + 
+        total_IFatal_detect
+      results$TotalIVFatal[param_index] <- results$TotalIVFatal[param_index] + 
+        total_IVFatal_detect
+      
+      # Summarize `age_stratified_cases` into `sim_df`
+      sim_df <- as.data.frame.table(sim_result$age_stratified_cases, responseName = "Cases") %>%
+        mutate(
+          Iteration           = i_iter,
+          Scenario            = scenario_index,
+          TotalSupplyRate     = params$TotalSupplyRate,
+          WeeklyDeliverySpeed = params$WeeklyDeliverySpeed,
+          VE_block            = params$VE_block,
+          VE_p                = params$VE_p,
+          AgeGroup            = as.numeric(Var1),
+          Week                = as.numeric(Var2)
+        )
+      
+      # Store summarized results in `iteration_sim_dfs`
+      iteration_sim_dfs[[length(iteration_sim_dfs) + 1]] <- sim_df
+      
+      # Store simulation results in `iteration_result`
+      iteration_result[[paste0(
+        "Scenario_", scenario_index, 
+        "_Supply_", params$TotalSupplyRate,
+        "_Speed_", params$WeeklyDeliverySpeed,
+        "_VEblock_", params$VE_block,
+        "_VEp_", params$VE_p
+      )]] <- sim_result
+    }
+  }
+  
+  # Store detailed results for this iteration
+  all_results[[i_iter]] <- iteration_result
+}
+
+```
+
+```{r summary list: age stratified cases}
+unique_scenarios <- unique(unlist(lapply(all_results, function(iteration) names(iteration))))
+
+summary_list <- list()
+
+for (scenario in unique_scenarios) {
+  print(paste("Processing:", scenario))
+  
+  # Extract data for the current scenario
+  scenario_data <- extract_scenario_data(scenario, all_results)
+  
+  # Compute median across iterations
+  median_summary <- compute_median(scenario_data)
+  
+  # Store the summarized data
+  summary_list[[scenario]] <- median_summary
+}
+
+```
+
+```{r summary list: age strat cases final summary with impact}
+final_summ <- lapply(summary_list, function(df) {
+  df %>%
+    group_by(Week, Scenario) %>%  # Include Scenario in grouping
+    summarise(
+      Median = sum(MedianCases, na.rm = TRUE),  # Summarize MedianCases
+      .groups = "drop"  # Drop grouping for clarity in the output
+    ) %>% mutate(
+      pre_vacc = summary_cases_pre_all$Median,
+      diff     = pre_vacc - Median,
+      impact   = diff / pre_vacc * 100
+    ) %>% mutate(
+      Supply = as.numeric(sub("Supply_", "", stringr::str_extract(Scenario, "Supply_\\d+(\\.\\d+)?"))),
+      Speed = as.numeric(sub("Speed_", "", stringr::str_extract(Scenario, "Speed_\\d+(\\.\\d+)?"))),
+      VE_block = as.numeric(sub("VEblock_", "", stringr::str_extract(Scenario, "VEblock_\\d+(\\.\\d+)?"))),
+      VE_p = as.numeric(sub("VEp_", "", stringr::str_extract(Scenario, "VEp_\\d+(\\.\\d+)?")))
+    )
+})
+
+final_summ_s1_ve <- final_summ[startsWith(names(final_summ), "Scenario_1_")]
+
+total_impact_s1_ve <- lapply(final_summ_s1_ve, function(df) {
+  df %>% group_by(Scenario) %>%
+    summarise(tot_diff = sum(diff),
+              pre_vacc = sum(pre_vacc))%>% mutate(
+              pre_vacc = sum(pre_vacc),
+              tot_impact = tot_diff / pre_vacc * 100
+              )
+})
+
+final_total_impact_s1_ve <- do.call(rbind, total_impact_s1_ve)
+
+summary_table_s1_ve <- final_total_impact_s1_ve %>%
+  # Extract Delay and Duration using regex
+  mutate(
+    VEblock   = as.numeric(sub("VEblock_", "", stringr::str_extract(Scenario, "VEblock_\\d+(\\.\\d+)?"))),
+    VEp       = as.numeric(sub("VEp_", "", stringr::str_extract(Scenario, "VEp_\\d+(\\.\\d+)?"))),
+    Supply    = as.numeric(sub("Supply_", "", str_extract(Scenario, "Supply_\\d+(\\.\\d+)?"))),
+    Speed     = as.numeric(sub("Speed_", "", str_extract(Scenario, "Speed_\\d+(\\.\\d+)?")))
+  )
+
+```
+
+
+```{r nnv by age group}
+summary_cases_pre_age <- summary_cases_pre %>% group_by(AgeGroup) %>% 
+                            summarise(Median = sum(Median))
+
+summary_R_pre_age <- summary_R_pre %>%
+  group_by(AgeGroup) %>%
+  filter(Week == 52) 
+
+final_summ_nnv <- lapply(summary_list, function(df) {
+  df %>%
+    group_by(AgeGroup, Scenario) %>%  # Include Scenario in grouping
+    summarise(
+      Median = sum(MedianCases, na.rm = TRUE),  # Summarize MedianCases
+      .groups = "drop"  # Drop grouping for clarity in the output
+    ) %>% mutate(
+      pre_vacc     = summary_cases_pre_age$Median,
+      diff         = pre_vacc - Median,
+      impact       = diff / pre_vacc * 100,
+      tot_attacked = summary_R_pre_age$Median_rho
+    ) %>% mutate(
+      Supply = as.numeric(sub("Supply_", "", stringr::str_extract(Scenario, "Supply_\\d+(\\.\\d+)?"))),
+      Speed = as.numeric(sub("Speed_", "", stringr::str_extract(Scenario, "Speed_\\d+(\\.\\d+)?"))),
+      VE_block = as.numeric(sub("VEblock_", "", stringr::str_extract(Scenario, "VEblock_\\d+(\\.\\d+)?"))),
+      VE_p = as.numeric(sub("VEp_", "", stringr::str_extract(Scenario, "VEp_\\d+(\\.\\d+)?"))),
+      pop  = N_region1,
+      attack_rate = tot_attacked / pop,
+      nnv  = 1 / (attack_rate * VE_block)
+    )
+})
+
+
+```
+
+```{r ggplot}
+ggplot(data = summary_table_s1_ve, aes(x = VEblock, y = Supply, z = tot_impact)) +
+  geom_contour_filled(alpha = 0.9) +  # Create filled contour plot
+  scale_fill_viridis_d(name = "Impact (%)") +  # Use a nice color scale
+  theme_minimal()+
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "black", size = 0.5) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "black", size = 0.5) +
+  facet_grid(Speed ~ VEp, labeller = label_both)+
+  labs(caption = "Note: VEp = disease blocking vaccine efficacy")+
+  theme(
+    plot.caption = element_text(hjust = 0, size = 7)  # Left-align caption
+  )
+```
+
+```{r allocation}
+alloc_summary_list <- list()
+
+for (scenario in unique_scenarios) {
+  print(paste("Processing:", scenario))
+  
+  # Extract data for the current scenario
+  scenario_data <- extract_raw_allocation(scenario, all_results)
+  
+  # Store the summarized data
+  alloc_summary_list[[scenario]] <- scenario_data
+}
+
+```
+
+```{r grid search to test delay x coverage x VE under fixed weekly speed}
+# Total supply rate (0% to 100%)
+total_supply_rates <- seq(0.1, 1, by = 0.1)         
+
+# Transmission blocking efficacy and disease blocking efficacy (10% to 100%)
+VE_blocks <- seq(0.1, 1, by = 0.1)               
+VE_ps <- seq(0.1, 1, by = 0.1)
+
+# Delay
+delay = seq(1, 52, by = 1)
+
+param_grid_delay <- expand.grid(
+  TotalSupplyRate     = total_supply_rates,
+  VE_block            = VE_blocks,
+  VE_p                = VE_ps,
+  delay               = delay
+)
+
+param_grid_delay <- param_grid_delay %>%
+  mutate(
+    TotalSupplyRate = as.numeric(TotalSupplyRate),
+    VE_block       = as.numeric(VE_block),
+    VE_p        = as.numeric(VE_p),
+    delay     = as.numeric(delay)
+  )
+
+results_delay <- data.frame(
+  CombinationID       = seq_len(nrow(param_grid_delay)),
+  TotalSupplyRate     = param_grid_delay$TotalSupplyRate,
+  delay               = param_grid_delay$delay,
+  VE_block            = param_grid_delay$VE_block,
+  VE_p                = param_grid_delay$VE_p,
+  Impact              = numeric(nrow(param_grid_delay)),          
+  TotalIFatal         = numeric(nrow(param_grid_delay)),     
+  TotalIVFatal        = numeric(nrow(param_grid_delay))     
+)
+
+```
