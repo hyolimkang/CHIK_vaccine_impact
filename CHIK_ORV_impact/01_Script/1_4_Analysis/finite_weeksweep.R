@@ -105,7 +105,10 @@ simulate_weeksweep_finite <- function(
       rho = rho_med, gamma = gamma_med, sigma = sigma_med,
       delay = delay_wk, target_age = target, total_coverage = coverage,
       weekly_delivery_speed = wd_med,
-      VE_block = ve_med, VE_inf = ve_med, coverage_threshold = 1
+      # VE_block = 0: infection-and-disease blocking -- VE_inf already removes
+      # the same immune successes from S, so a VE_block term on top would
+      # double-count the symptom reduction (see chat record).
+      VE_block = 0, VE_inf = ve_med, coverage_threshold = 1
     )
     sum(sim$true_symptomatic)
   }

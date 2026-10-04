@@ -2940,7 +2940,18 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
       }
 
       # for ve x vc simulation
-      VE_block_draw <- ve_rand_draw   ## always block disease
+      # VE_block_draw is 0 for the infection-and-disease-blocking endpoint
+      # scenario (is.na(ve_inf)): VE_inf already removes the same immune
+      # successes from S for both infection and disease protection, and
+      # protection failures get no separate symptom protection, so applying
+      # VE_block on top of that double-counts the symptom reduction. The
+      # disease-only (ve_inf == 0) and any other fixed-ve_inf scenario keep
+      # VE_block = ve_rand_draw unchanged (see chat record).
+      VE_block_draw <- if (is.na(ve_inf)) {
+        0  # Infection prevention already accounts for disease prevention.
+      } else {
+        ve_rand_draw  # Preserve existing behavior for other inputs.
+      }
 
       VE_inf_draw <- if (is.na(ve_inf)) {
         ve_rand_draw
