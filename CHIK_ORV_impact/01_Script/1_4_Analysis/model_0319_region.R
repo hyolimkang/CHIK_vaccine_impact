@@ -29,7 +29,7 @@ lhs_sample_young <- readRDS("00_Data/0_2_Processed/lhs_sample_young.RDS")
 lhs_old <- readRDS("00_Data/0_2_Processed/lhs_old.RDS")
 le_sample <- readRDS("00_Data/0_2_Processed/le_sample.RDS")
 source("01_Script/1_1_Functions/sim_functions_final.R")
-source("01_Script/1_1_Functions/age_struc_fitting_region_func.R")
+source("01_Script/1_1_Functions/age_struc_fitting_region_func_updated.R")
 source("01_Script/1_1_Functions/library.R")
 
 # extract params-----------------------------------------------------------------

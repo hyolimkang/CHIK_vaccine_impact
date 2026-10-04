@@ -67,7 +67,7 @@ rho_df$region_full <- region_names
 rho_df <- rho_df[,c(2:5)]
 colnames(rho_df)[4] <- "region"
 
-save(rho_df, file = "00_Data/0_2_Processed/rho_df.RData")
+save(rho_df, file = "00_Data/0_2_Processed/rho_df_finite.RData")
 
 gamma_df <- map_dfr(names(posterior_list), function(region) {
   est <- gamma_estim(posterior_list[[region]])

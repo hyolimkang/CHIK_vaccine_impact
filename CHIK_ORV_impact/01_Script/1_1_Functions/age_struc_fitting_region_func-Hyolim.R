@@ -82,7 +82,7 @@ create_summary_df <- function(
     fit_prevacc,       # 3D array: [iteration, week, age]
     bra_sum,
     weeks        = 1:nrow(bra_sum),   # Vector of week indices
-    age_groups   = 1:18,   # Vector of age group indices
+    age_groups   = 1:20,   # Vector of age group indices
     scenario     = "Pre-Vaccination",
     region
 ) {

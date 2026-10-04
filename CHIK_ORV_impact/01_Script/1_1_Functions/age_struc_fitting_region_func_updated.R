@@ -1,3 +1,6 @@
+load("00_Data/0_2_Processed/bra_state_short_term_foi.RData")  # results_df
+bra_state_short_term_foi <- results_df
+
 age_groups <- c(mean(0:1),
                 mean(1:4),
                 mean(5:9),
@@ -223,13 +226,24 @@ agestrat_ui_gg <- function(combined_df){
 
 # extract stan params
 extract_params <- function(fit_prevacc){
-  
+
   posterior_prevacc <- rstan::extract(fit_prevacc)
-  base_beta       <- apply(posterior_prevacc$base_beta, 2, median)       # length T
-  I0              <- apply(posterior_prevacc$I0, 2, median)           
+
+  # New (finite-history) model stores the weekly transmission trajectory
+  # as beta_observed; older fits used base_beta. Fall back accordingly.
+  beta_draws <- if ("beta_observed" %in% names(posterior_prevacc)) {
+    posterior_prevacc$beta_observed
+  } else if ("base_beta" %in% names(posterior_prevacc)) {
+    posterior_prevacc$base_beta
+  } else {
+    stop("Neither beta_observed nor base_beta exists.")
+  }
+
+  base_beta       <- apply(beta_draws, 2, median)       # length T
+  I0              <- apply(posterior_prevacc$I0, 2, median)
   gamma           <- median(posterior_prevacc$gamma)
-  rho             <- median(posterior_prevacc$rho, 2, median)
-  
+  rho             <- median(posterior_prevacc$rho)
+
   return(list(
     posterior_prevacc = posterior_prevacc,
     base_beta         = base_beta,
@@ -258,7 +272,46 @@ make_region_foi_draws <- function(regions, bra_foi_states, n_draws = 1000) {
     
     draws_list[[reg]] <- sample(foi_values, size = n_draws, replace = TRUE)
   }
-  
+
+  return(draws_list)
+}
+
+## prevacc posterior draws (95% UI) -- short-term (fitting-consistent) FOI --------------
+# Same role as make_region_foi_draws() above, but draws from the short-term
+# FOI estimate (bra_state_short_term_foi$H_median/H_lo/H_hi) used to build
+# sero_finite during fitting (see make_finite_prevacc_data() in
+# age_struc_fitting_region_finite_2022.R), instead of the long-term average
+# FOI (bra_foi_states$foi1..foi100). bra_state_short_term_foi only gives one
+# median + 95% CI per state (no raw per-pixel draws to resample), so
+# uncertainty is generated via a truncated normal bounded by H_lo/H_hi,
+# using the same 95%-CI -> SD convention used for the other LHS parameters
+# (ve, vc, wd) in lhs_samples_sir.R.
+make_region_foi_draws_shortterm <- function(regions, bra_state_short_term_foi, n_draws = 1000) {
+  draws_list <- list()
+  set.seed(123)
+
+  for (reg in regions) {
+
+    foi_row <- bra_state_short_term_foi[bra_state_short_term_foi$state == reg, ]
+
+    stopifnot(
+      "region not found in bra_state_short_term_foi" = nrow(foi_row) == 1
+    )
+
+    h_median <- foi_row$H_median
+    h_lo     <- foi_row$H_lo
+    h_hi     <- foi_row$H_hi
+    h_sd     <- (h_hi - h_lo) / (2 * qnorm(0.975))
+
+    draws_list[[reg]] <- truncnorm::rtruncnorm(
+      n_draws,
+      a    = h_lo,
+      b    = h_hi,
+      mean = h_median,
+      sd   = h_sd
+    )
+  }
+
   return(draws_list)
 }
 
@@ -277,7 +330,19 @@ regions <- c(
 )
 
 set.seed(123)
-foi_draws_list <- make_region_foi_draws(regions, bra_foi_states)
+foi_draws_list <- make_region_foi_draws(regions, bra_foi_states)  # long-term average FOI (kept as-is; used by the original lhs_samples_sir.R pipeline)
+
+# short-term FOI (bra_state_short_term_foi$H_median-based). No longer used by
+# lhs_samples_sir_finite.R (reverted to foi_draws_list/long-term FOI to match
+# make_finite_prevacc_data() after fitting also reverted to long-term FOI).
+# Guarded so sourcing this file doesn't hard-fail when bra_state_short_term_foi
+# hasn't been loaded -- everything below this point no longer depends on it.
+if (exists("bra_state_short_term_foi")) {
+  set.seed(123)
+  foi_draws_list_shortterm <- make_region_foi_draws_shortterm(regions, bra_state_short_term_foi)
+} else {
+  message("bra_state_short_term_foi not found -- skipping foi_draws_list_shortterm (not needed unless you explicitly want the short-term-FOI lhs pipeline).")
+}
 
 
 ######
@@ -288,7 +353,13 @@ simulate_pre_ui_age <- function(posterior, bra_foi_state_summ, age_groups, N, re
                                 coverage_threshold = 0, total_coverage = 0,
                                 total_supply = 0, weekly_delivery_speed = 0,
                                 lhs_sample,
-                                sero_vec = NULL) {
+                                sero_vec = NULL,
+                                # TRUE: finite-history model -- cap cumulative exposure at
+                                # years since 2014 introduction (use with lhs_combined_finite,
+                                # which draws FOI from bra_state_short_term_foi).
+                                # FALSE: original model -- uncapped lifetime exposure to the
+                                # long-term average FOI (use with lhs_combined).
+                                finite_history = TRUE) {
   # Dynamically set T 
   T <- nrow(observed)
   
@@ -343,22 +414,31 @@ simulate_pre_ui_age <- function(posterior, bra_foi_state_summ, age_groups, N, re
     #FOI_rand_draw  <- lhs_sample$foi[i]
     
     # 3. based on pre-defined id
+    # gamma/rho/sigma from `posterior` (same idx_post as beta_draws/I0), not
+    # the independently-resampled lhs_sample columns -- see the matching fix
+    # in run_simulation_scenarios_ui_ixchiq() and lhs_samples_sir_finite.R.
     base_beta_draw <- beta_draws[idx_post, ]
     I0_draw        <- posterior$I0[idx_post, ]
-    gamma_draw     <- lhs_sample$gamma[idx_lhs]
-    rho_draw       <- lhs_sample$rho[idx_lhs]
-    sigma_draw     <- lhs_sample$sigma[idx_lhs]
+    gamma_draw     <- posterior$gamma[idx_post]
+    rho_draw       <- posterior$rho[idx_post]
+    sigma_draw     <- posterior$sigma[idx_post]
     FOI_rand_draw  <- lhs_sample$foi[idx_lhs]
     
-    # Finite model: cap cumulative exposure at the years CHIKV has
-    # actually been circulating (2014-2022), matching
-    # run_simulation_scenarios_ui_ixchiq's R0_draw calculation.
     # sero_vec (if supplied) overrides this with an externally fixed baseline.
+    # Otherwise, exposure duration depends on finite_history:
+    #   TRUE  -> finite model: cap cumulative exposure at years since 2014
+    #            introduction (matches sero_finite used when fitting the
+    #            *_finite Stan models; pair with lhs_combined_finite).
+    #   FALSE -> original model: uncapped lifetime exposure to the long-term
+    #            average FOI (matches sero used when fitting the original
+    #            (non-finite) Stan models; pair with lhs_combined).
     if (!is.null(sero_vec)) {
       R0_vec <- sero_vec
+    } else if (finite_history) {
+      R0_vec <- (1 - exp(-FOI_rand_draw * pmin(age_groups, 2022 - 2014)))
     } else {
       #R0_vec <- (1 - exp(-bra_foi_state_summ$avg_foi[bra_foi_state_summ$NAME_1 == region] * age_groups))
-      R0_vec <- (1 - exp(-FOI_rand_draw * pmin(age_groups, 2022 - 2014)))
+      R0_vec <- (1 - exp(-FOI_rand_draw * age_groups))
     }
 
       sim_out <- sirv_sim_coverageSwitch(
@@ -2392,12 +2472,15 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
       #vc_rand_draw <- lhs_sample$vc[d]
       #wd_rand_draw <- lhs_sample$wd[d]
       
-      # 2. predefined idx 
+      # 2. predefined idx
+      # gamma/rho/sigma from `posterior` (same idx_post as base_beta/I0) --
+      # see the matching fix in run_simulation_scenarios_ui_ixchiq() and
+      # lhs_samples_sir_finite.R.
       base_beta_draw <- posterior$base_beta[idx_post, ]
       I0_draw        <- posterior$I0[idx_post, ]
-      gamma_draw     <- lhs_sample$gamma[idx_lhs]
-      rho_draw       <- lhs_sample$rho[idx_lhs]
-      sigma_draw     <- lhs_sample$sigma[idx_lhs]
+      gamma_draw     <- posterior$gamma[idx_post]
+      rho_draw       <- posterior$rho[idx_post]
+      sigma_draw     <- posterior$sigma[idx_post]
       FOI_rand_draw  <- lhs_sample$foi[idx_lhs]
       ve_rand_draw   <- lhs_sample$ve_ix[idx_lhs]
       #vc_rand_draw   <- lhs_sample$vc[idx_lhs]
@@ -2700,7 +2783,7 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
 }
 
 ## v4. finite history
-run_simulation_scenarios_ui_ixchiq <- function(target_age_list, 
+run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
                                                observed,
                                                N, bra_foi_state_summ, age_groups, region_name,
                                                hosp, fatal, nh_fatal,
@@ -2710,7 +2793,24 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
                                                posterior,
                                                ve_inf = 0,
                                                total_coverage = 0,
-                                               lhs_sample
+                                               lhs_sample,
+                                               # TRUE: finite-history model -- cap cumulative exposure at
+                                               # years since 2014 introduction (use with lhs_combined_finite).
+                                               # FALSE: original model -- uncapped lifetime exposure to the
+                                               # long-term average FOI (use with lhs_combined).
+                                               finite_history = TRUE,
+                                               # Vaccination campaign start week. Default (2) matches the
+                                               # value that used to be hardcoded here -- existing callers that
+                                               # don't pass this argument are unaffected.
+                                               delay = 2,
+                                               # Default NULL preserves existing behaviour exactly: coverage
+                                               # comes from the region_coverage global (region_coverage.RData),
+                                               # NOT from the total_coverage argument below (total_coverage is
+                                               # only used, elsewhere in this function, to pick which LHS vc
+                                               # column -- vc10/vc50/vc90 -- to sample from). Pass a fraction
+                                               # here (e.g. 0.5) to make total_coverage actually drive the
+                                               # simulated coverage instead of region_coverage.
+                                               coverage_override = NULL
 ) {
   # target_age_list: list of 0/1 vectors for each scenario
   # observed: observed data (used to set T)
@@ -2750,10 +2850,9 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
     target <- target_age_list[[s]]
     draw_results_raw_inf  <- vector("list", n_draws)
     draw_results_raw_symp <- vector("list", n_draws)
-    
-    pct <- region_coverage[[region_name]]
-    total_coverage_frac <- floor(pct) / 100
-    
+    draw_results_raw_alloc <- vector("list", n_draws)
+    draw_results_vacc_to_S <- vector("list", n_draws)
+
     #foi_row <- bra_foi_state_summ[bra_foi_state_summ$NAME_1 == region_name, ]
     #foi_mean <- foi_row$avg_foi
     foi_draws <- foi_draws_list[[region_name]]
@@ -2786,36 +2885,83 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
       #vc_rand_draw <- lhs_sample$vc[d]
       #wd_rand_draw <- lhs_sample$wd[d]
       
-      # 2. predefined idx 
+      # 2. predefined idx
+      # gamma/rho/sigma now come from `posterior` (same idx_post as
+      # beta_observed/I0), not from the independently-resampled lhs_sample
+      # columns -- keeps them jointly paired with the Stan draw they were
+      # actually fitted with, instead of a randomly mismatched draw (see
+      # lhs_samples_sir_finite.R for the corresponding lhs_combined_finite
+      # fix, and chat record diagnostic scripts
+      # 09_diagnose_ar_incidence_vs_hazard.R / 09b_diagnose_rho_consistency.R).
       base_beta_draw <- posterior$beta_observed[idx_post, ]
       I0_draw        <- posterior$I0[idx_post, ]
-      gamma_draw     <- lhs_sample$gamma[idx_lhs]
-      rho_draw       <- lhs_sample$rho[idx_lhs]
-      sigma_draw     <- lhs_sample$sigma[idx_lhs]
+      gamma_draw     <- posterior$gamma[idx_post]
+      rho_draw       <- posterior$rho[idx_post]
+      sigma_draw     <- posterior$sigma[idx_post]
       FOI_rand_draw  <- lhs_sample$foi[idx_lhs]
       ve_rand_draw   <- lhs_sample$ve_ix[idx_lhs]
       #vc_rand_draw   <- lhs_sample$vc[idx_lhs]
       wd_rand_draw   <- lhs_sample$wd[idx_lhs]
-      
-      # sampling from lhs by defined VC levels 
+
+      # sampling from lhs by defined VC levels
       vc_rand_draw <- case_when(
         total_coverage == 0.10 ~ lhs_sample$vc10[idx_lhs],
         total_coverage == 0.50 ~ lhs_sample$vc50[idx_lhs],
         total_coverage == 0.90 ~ lhs_sample$vc90[idx_lhs],
         TRUE ~ NA_real_
       )
-      
-      # for ve x vc simulation
-      VE_block_draw <- ve_rand_draw   ## always block disease                    
-      
-      VE_inf_draw <- if (is.na(ve_inf)) {                 
-        ve_rand_draw                                      
-      } else if (ve_inf == 0) {                           
-        0                                                 
-      } else {                                          
-        ve_inf                                         
+
+      # Coverage actually fed to the mechanistic model. Priority:
+      #   1) coverage_override, if supplied -- an exact fixed fraction (no
+      #      per-draw uncertainty), for coverage values that don't have a
+      #      pre-built LHS uncertainty column (e.g. a week x coverage grid
+      #      at 30%/60%).
+      #   2) vc_rand_draw -- per-draw sample from the LHS uncertainty
+      #      distribution around the requested tier (matches how every other
+      #      parameter here -- ve, wd, gamma, rho, sigma, foi -- is drawn
+      #      per-draw from lhs_sample). Only defined for total_coverage in
+      #      {0.10, 0.50, 0.90} (lhs_sample$vc10/vc50/vc90).
+      # NOTE: previously this used region_coverage[[region_name]] (a fixed,
+      # region-specific value from region_coverage.RData) instead, which
+      # silently ignored total_coverage/coverage_override entirely. That
+      # value also turned out not to be a coverage figure at all -- it's the
+      # % of each region's population aged 12-17 (bra_totpop_clean.R's
+      # scenario "s_2"), left over from an unrelated calculation.
+      if (!is.null(coverage_override)) {
+        total_coverage_frac <- coverage_override
+      } else if (!is.na(vc_rand_draw)) {
+        total_coverage_frac <- vc_rand_draw
+      } else {
+        stop(
+          "total_coverage = ", total_coverage, " has no matching LHS ",
+          "uncertainty column (vc10/vc50/vc90 exist for 0.10/0.50/0.90 only). ",
+          "Pass coverage_override for other coverage fractions."
+        )
       }
-      
+
+      # for ve x vc simulation
+      VE_block_draw <- ve_rand_draw   ## always block disease
+
+      VE_inf_draw <- if (is.na(ve_inf)) {
+        ve_rand_draw
+      } else if (ve_inf == 0) {
+        0
+      } else {
+        ve_inf
+      }
+
+      # Exposure duration depends on finite_history:
+      #   TRUE  -> finite model: cap at years since 2014 introduction
+      #            (pair with lhs_combined_finite).
+      #   FALSE -> original model: uncapped lifetime exposure to the
+      #            long-term average FOI (pair with lhs_combined).
+      #R0_draw <- 1 - exp(- bra_foi_state_summ$avg_foi[bra_foi_state_summ$NAME_1 == region_name] * age_groups)
+      if (finite_history) {
+        R0_draw <- 1 - exp(-FOI_rand_draw * pmin(age_groups, 2022 - 2014))
+      } else {
+        R0_draw <- 1 - exp(-FOI_rand_draw * age_groups)
+      }
+
       sim_out <- sirv_sim_coverageSwitch_ixchiq(
         T = T,
         A = length(age_gr_levels),
@@ -2823,15 +2969,11 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
         r = rep(0, length(age_gr_levels)),
         base_beta = base_beta_draw,
         I0_draw = I0_draw,
-        #R0 = 1 - exp(- bra_foi_state_summ$avg_foi[bra_foi_state_summ$NAME_1 == region_name] * age_groups),
-        #R0 = 1 - exp(- FOI_rand_draw * age_groups),  # long-term FOI
-        R0_draw <- 1 - exp(
-          -FOI_rand_draw * pmin(age_groups, 2022-2014)
-        ),
+        R0 = R0_draw,
         rho = rho_draw,
         gamma = gamma_draw,
         sigma = sigma_draw,
-        delay = 2,
+        delay = delay,
         VE_block = VE_block_draw,
         VE_inf = VE_inf_draw,
         #coverage_threshold = 1,
@@ -2845,6 +2987,8 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
       
       draw_results_raw_inf[[d]]  <- sim_out$age_stratified_cases_raw  # A x T matrix
       draw_results_raw_symp[[d]] <- sim_out$true_symptomatic  # A x T matrix
+      draw_results_raw_alloc[[d]] <- sim_out$raw_allocation_age  # A x T matrix
+      draw_results_vacc_to_S[[d]] <- sim_out$vacc_delayed        # A x T matrix
       
       if (anyNA(sim_out$age_stratified_cases_raw))
         stop("Draw ", d, ": sim_out produced NA")
@@ -2853,6 +2997,8 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
     # Combine draw results into a 3D array [18, T, n_draws]
     age_array_raw_inf  <- array(unlist(draw_results_raw_inf), dim = c(20, T, n_draws))
     age_array_raw_symp <- array(unlist(draw_results_raw_symp), dim = c(20, T, n_draws))
+    raw_allocation_array <- array(unlist(draw_results_raw_alloc), dim = c(20, T, n_draws))
+    vacc_to_S_array      <- array(unlist(draw_results_vacc_to_S), dim = c(20, T, n_draws))
     
     # Compute quantiles for each age and week over draws:
     median_by_age_rawinf <- apply(age_array_raw_inf, c(1, 2), median)
@@ -3082,6 +3228,8 @@ run_simulation_scenarios_ui_ixchiq <- function(target_age_list,
     
     scenario_result[[s]] <- list(sim_result = list(age_array_raw_symp           = age_array_raw_symp,
                                                    age_array_raw_inf            = age_array_raw_inf,
+                                                   raw_allocation_array         = raw_allocation_array,
+                                                   vacc_to_S_array              = vacc_to_S_array,
                                                    weekly_cases_median_rawsymp  = weekly_cases_median_rawsymp,
                                                    weekly_cases_median_rawinf   = weekly_cases_median_rawinf,
                                                    weekly_cases_low95_rawsymp   = weekly_cases_low95_rawsymp,
@@ -3170,12 +3318,15 @@ run_simulation_scenarios_ui_vimkun <- function(target_age_list,
       #rho_draw       <- posterior$rho[d]
       #sigma_draw     <- posterior$sigma[d]
       
-      # 2. predefined idx 
+      # 2. predefined idx
+      # gamma/rho/sigma from `posterior` (same idx_post as base_beta/I0) --
+      # see the matching fix in run_simulation_scenarios_ui_ixchiq() and
+      # lhs_samples_sir_finite.R.
       base_beta_draw <- posterior$base_beta[idx_post, ]
       I0_draw        <- posterior$I0[idx_post, ]
-      gamma_draw     <- lhs_sample$gamma[idx_lhs]
-      rho_draw       <- lhs_sample$rho[idx_lhs]
-      sigma_draw     <- lhs_sample$sigma[idx_lhs]
+      gamma_draw     <- posterior$gamma[idx_post]
+      rho_draw       <- posterior$rho[idx_post]
+      sigma_draw     <- posterior$sigma[idx_post]
       FOI_rand_draw  <- lhs_sample$foi[idx_lhs]
       ve_rand_draw   <- lhs_sample$ve_vimkun[idx_lhs]
       vc_rand_draw   <- lhs_sample$vc[idx_lhs]
@@ -4444,7 +4595,11 @@ postsim_all_ui <- function(scenario_result,   # list of scenario outputs: each w
         pre_fatal             = pre_summary_cases_age$fatal,
         pre_fatal_low95       = pre_summary_cases_age$fatal_lo,
         pre_fatal_hi          = pre_summary_cases_age$fatal_hi,
-        
+
+        pre_hospitalised       = pre_summary_cases_age$hospitalised,
+        pre_hospitalised_low95 = pre_summary_cases_age$hospitalised_lo,
+        pre_hospitalised_hi    = pre_summary_cases_age$hospitalised_hi,
+
         # Differences for infections:
         diff_inf    = pre_infection - infection,
         diff_inf_lo = pre_infection_lo - infection_lo,
@@ -4456,7 +4611,7 @@ postsim_all_ui <- function(scenario_result,   # list of scenario outputs: each w
         impact     = diff / pre_vacc * 100,
         impact_low = diff_low / pre_vacc_low95 * 100,
         impact_hi  = diff_hi / pre_vacc_hi95 * 100,
-        
+
         # Differences for Fatal outcomes:
         diff_fatal       = pre_fatal - fatal,
         diff_fatal_low   = pre_fatal_low95 - fatal_lo,
@@ -4464,7 +4619,15 @@ postsim_all_ui <- function(scenario_result,   # list of scenario outputs: each w
         impact_fatal     = diff_fatal / pre_fatal * 100,
         impact_fatal_low = diff_fatal_low / pre_fatal_low95 * 100,
         impact_fatal_hi  = diff_fatal_hi / pre_fatal_hi * 100,
-        
+
+        # Differences for Hospitalisations:
+        diff_hosp       = pre_hospitalised - hospitalised,
+        diff_hosp_low   = pre_hospitalised_low95 - hospitalised_lo,
+        diff_hosp_hi    = pre_hospitalised_hi - hospitalised_hi,
+        impact_hosp     = diff_hosp / pre_hospitalised * 100,
+        impact_hosp_low = diff_hosp_low / pre_hospitalised_low95 * 100,
+        impact_hosp_hi  = diff_hosp_hi / pre_hospitalised_hi * 100,
+
         # Differences for YLD Acute:
         diff_yld_acute       = pre_yld_acute - yld_acute,
         diff_yld_acute_low   = pre_yld_acute_low95 - yld_acute_lo,
@@ -4624,18 +4787,11 @@ postsim_all_ui <- function(scenario_result,   # list of scenario outputs: each w
   
   summary_week_df$region <- region
   
-  summary_week_df <- summary_week_df %>%
-    left_join(rho_df, by = "region") %>%
-    mutate(
-      across(
-        c(post_cases, post_cases_lo, post_cases_hi, pre_cases, pre_cases_lo, pre_cases_hi, diff, post_fatal, post_fatal_lo, post_fatal_hi,
-          pre_fatal,  pre_fatal_lo, pre_fatal_hi, diff_fatal,
-          post_daly,  post_daly_lo, post_daly_hi, pre_daly, pre_daly_lo, pre_daly_hi, diff_daly, post_weekly_median, post_weekly_low95,
-          post_weekly_hi95, lo95, hi95),
-        ~ .x / rho_p50
-      ) 
-    )
-  
+  # post_cases/pre_cases/fatal/daly are already TRUE-scale (true_symptomatic
+  # is now p_sym-only, no rho -- see sim_functions_final.R). The old
+  # /rho_p50 post-scaling step is no longer needed and would now over-inflate
+  # these values a second time. Removed -- see chat record, 2026-08-20.
+
   # Global impact annotation
   global_impact_week <- summary_week_df %>%
     dplyr::group_by(Scenario) %>%
@@ -5620,6 +5776,12 @@ nnv_list <- function(vacc_allocation,
         post_daly     = sum(daly_tot),
         post_daly_lo  = sum(daly_tot_lo),
         post_daly_hi  = sum(daly_tot_hi),
+        pre_hosp      = sum(pre_hospitalised),
+        pre_hosp_lo   = sum(pre_hospitalised_low95),
+        pre_hosp_hi   = sum(pre_hospitalised_hi),
+        post_hosp     = sum(hospitalised),
+        post_hosp_lo  = sum(hospitalised_lo),
+        post_hosp_hi  = sum(hospitalised_hi),
         # 2) age group당 averted diff 합계
         diff_inf      = sum(diff_inf),
         diff_inf_lo   = sum(diff_inf_lo),
@@ -5627,34 +5789,32 @@ nnv_list <- function(vacc_allocation,
         diff          = sum(diff,          na.rm = TRUE),
         diff_low      = sum(diff_low,      na.rm = TRUE),
         diff_hi       = sum(diff_hi,       na.rm = TRUE),
-        # (fatal / daly 도 동일하게)
+        # (fatal / daly / hosp 도 동일하게)
         diff_fatal    = sum(diff_fatal,    na.rm = TRUE),
         diff_fatal_low= sum(diff_fatal_low,na.rm = TRUE),
         diff_fatal_hi = sum(diff_fatal_hi, na.rm = TRUE),
         diff_daly     = sum(diff_daly,     na.rm = TRUE),
         diff_daly_low = sum(diff_daly_low, na.rm = TRUE),
         diff_daly_hi  = sum(diff_daly_hi,  na.rm = TRUE),
+        diff_hosp     = sum(diff_hosp,     na.rm = TRUE),
+        diff_hosp_low = sum(diff_hosp_low, na.rm = TRUE),
+        diff_hosp_hi  = sum(diff_hosp_hi,  na.rm = TRUE),
         .groups = "drop"
       ) %>%
-      # 2) 바로 스케일링
+      # pre_vacc/post_vacc/pre_hosp/post_hosp/pre_fatal/post_fatal/pre_daly/
+      # post_daly/diff_* are already TRUE-scale (true_symptomatic is now
+      # p_sym-only, no rho -- see sim_functions_final.R). The old /rho_p50
+      # post-scaling step (originally undoing a rho that used to be baked
+      # into true_symptomatic upstream, per the "v3 truesymptomatic ->
+      # post-scaling: /rho_p50" comment elsewhere in this file) is no longer
+      # needed and would now over-inflate these values a second time.
+      # Removed -- see chat record, 2026-08-20.
+      # pre_infection/post_infection removed (pre_vacc/p_sym would double as
+      # a "total infections" proxy, but it's deflated by (1-VE_block*coverage)
+      # and thus not equal to true infection counts; pre_inf/post_inf/diff_inf
+      # above already correctly track new_e directly). See chat record,
+      # 2026-08-20.
       mutate(region = region) %>%
-      left_join(rho_df, by = "region") %>%
-      mutate(
-        across(
-          .cols = c(pre_vacc, pre_vacc_lo, pre_vacc_hi, 
-                    post_vacc, post_vacc_lo, post_vacc_hi,
-                    pre_fatal, pre_fatal_lo, pre_fatal_hi,
-                    post_fatal, post_fatal_lo, post_fatal_hi,
-                    pre_daly, pre_daly_lo, pre_daly_hi,
-                    post_daly, post_daly_lo, post_daly_hi,
-                    diff, diff_low, diff_hi,
-                    diff_fatal, diff_fatal_low, diff_fatal_hi,
-                    diff_daly, diff_daly_low, diff_daly_hi),
-          .fns  = ~ .x / rho_p50
-        ), 
-        pre_infection  = pre_vacc / 0.5242478,
-        post_infection = post_vacc / 0.5242478
-      ) %>%
       mutate(
         scenario_vacc = raw_allocation_age[[idx]]
       ) %>%
@@ -5662,47 +5822,51 @@ nnv_list <- function(vacc_allocation,
         nnv_inf     = scenario_vacc / diff_inf,
         nnv_inf_lo  = scenario_vacc / diff_inf_hi,
         nnv_inf_hi  = scenario_vacc / diff_inf_lo,
-        
+
         nnv         = scenario_vacc / diff,
         nnv_lo      = scenario_vacc / diff_hi,
         nnv_hi      = scenario_vacc / diff_low,
-        
+
         nnv_fatal       = scenario_vacc / diff_fatal,
         nnv_fatal_lo    = scenario_vacc / diff_fatal_hi,
         nnv_fatal_hi    = scenario_vacc / diff_fatal_low,
-        
+
         nnv_daly        = scenario_vacc / diff_daly,
         nnv_daly_lo     = scenario_vacc / diff_daly_hi,
-        nnv_daly_hi     = scenario_vacc / diff_daly_low
-        
+        nnv_daly_hi     = scenario_vacc / diff_daly_low,
+
+        nnv_hosp        = scenario_vacc / diff_hosp,
+        nnv_hosp_lo     = scenario_vacc / diff_hosp_hi,
+        nnv_hosp_hi     = scenario_vacc / diff_hosp_low
+
       )
     summary_by_age <- summary_by_age %>% mutate(
       target = target
     )  %>%
-      relocate(target, .after = scenario)  
-    
+      relocate(target, .after = scenario)
+
   })
   )
-  
+
   final_summ_df <- final_summ_df %>%
     mutate(
       tot_pop        = rep(N, n_scenarios),
       tot_vacc_prop  = tot_vacc / tot_pop,
-      age_gr        = factor(default_age_vector[AgeGroup], 
+      age_gr        = factor(default_age_vector[AgeGroup],
                              levels = gsub("[–—]", "-", default_age_vector))
     )
-  
+
   #final_summ_df$age_gr <- rep(age_gr[1:length(age_gr_levels)],n_scenarios)
   final_summ_df$age_gr <- factor(final_summ_df$age_gr, levels = age_gr_levels)
   final_summ_df$region <- region
-  
-  # —— ② scenario × target별 per1M 요약 —— 
+
+  # —— ② scenario × target별 per1M 요약 ——
   per1M_summary <- final_summ_df %>%
     group_by(scenario, target) %>%
     summarise(
       scenario_vacc = first(scenario_vacc),
       tot_pop       = sum(tot_pop),
-      vacc_prop     = scenario_vacc / tot_pop, 
+      vacc_prop     = scenario_vacc / tot_pop,
       diff          = sum(diff,        na.rm = TRUE),
       diff_low      = sum(diff_low,    na.rm = TRUE),
       diff_hi       = sum(diff_hi,     na.rm = TRUE),
@@ -5712,32 +5876,43 @@ nnv_list <- function(vacc_allocation,
       diff_daly     = sum(diff_daly,     na.rm = TRUE),
       diff_daly_low = sum(diff_daly_low, na.rm = TRUE),
       diff_daly_hi  = sum(diff_daly_hi,  na.rm = TRUE),
+      diff_hosp     = sum(diff_hosp,     na.rm = TRUE),
+      diff_hosp_low = sum(diff_hosp_low, na.rm = TRUE),
+      diff_hosp_hi  = sum(diff_hosp_hi,  na.rm = TRUE),
       .groups = "drop"
     ) %>%
     mutate(
       per1M_diff       = diff        / scenario_vacc * 1e6,
       per1M_diff_lo    = diff_low    / scenario_vacc * 1e6,
       per1M_diff_hi    = diff_hi     / scenario_vacc * 1e6,
-      
+
       per1M_fatal      = diff_fatal      / scenario_vacc * 1e6,
       per1M_fatal_lo   = diff_fatal_low  / scenario_vacc * 1e6,
       per1M_fatal_hi   = diff_fatal_hi   / scenario_vacc * 1e6,
-      
+
       per1M_daly       = diff_daly       / scenario_vacc * 1e6,
       per1M_daly_lo    = diff_daly_low   / scenario_vacc * 1e6,
       per1M_daly_hi    = diff_daly_hi    / scenario_vacc * 1e6,
-      
+
+      per1M_hosp       = diff_hosp       / scenario_vacc * 1e6,
+      per1M_hosp_lo    = diff_hosp_low   / scenario_vacc * 1e6,
+      per1M_hosp_hi    = diff_hosp_hi    / scenario_vacc * 1e6,
+
       nnv         = scenario_vacc / diff,
       nnv_lo      = scenario_vacc / diff_hi,
       nnv_hi      = scenario_vacc / diff_low,
-      
+
       nnv_fatal       = scenario_vacc / diff_fatal,
       nnv_fatal_lo    = scenario_vacc / diff_fatal_hi,
       nnv_fatal_hi    = scenario_vacc / diff_fatal_low,
-      
+
       nnv_daly        = scenario_vacc / diff_daly,
       nnv_daly_lo     = scenario_vacc / diff_daly_hi,
-      nnv_daly_hi     = scenario_vacc / diff_daly_low
+      nnv_daly_hi     = scenario_vacc / diff_daly_low,
+
+      nnv_hosp        = scenario_vacc / diff_hosp,
+      nnv_hosp_lo     = scenario_vacc / diff_hosp_hi,
+      nnv_hosp_hi     = scenario_vacc / diff_hosp_low
     )
   
   # ⑥ return
